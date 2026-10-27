@@ -1,0 +1,4 @@
+- insert:
+    - id: dsh-delete-conversation
+      name: dsh-delete-conversation
+      config: {}

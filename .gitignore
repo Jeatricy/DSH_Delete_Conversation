@@ -1,0 +1,8 @@
+.research/
+node_modules/
+artifacts/
+*.tgz
+test-results/
+playwright-report/
+.env
+.env.*

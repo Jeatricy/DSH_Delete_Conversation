@@ -1,0 +1,20 @@
+{
+  "meta": {
+    "title": "Delete Conversation",
+    "description": "Adds a Delete button beside Archive to permanently remove a conversation's local history after confirmation."
+  },
+  "done": "Done",
+  "completedTitle": "Conversation deleted",
+  "cleanupWarning": "The conversation was deleted. An unrecognized historical shared cache was kept to protect other conversations.",
+  "delete": "Delete conversation",
+  "confirmTitle": "Permanently delete this conversation?",
+  "untitled": "Untitled conversation",
+  "description": "Permanently removes this conversation's local messages, logs, caches and reminders. This cannot be undone. Running work will be stopped first.",
+  "filesNote": "Project files in the working directory are kept. Independent branches and shared attachments are kept.",
+  "cancel": "Cancel",
+  "confirm": "Delete permanently",
+  "pending": "Stopping work and deleting…",
+  "failed": "Deletion failed",
+  "retry": "Retry deletion",
+  "unsupported": "This DSH version does not support safe deletion. See the plugin documentation."
+}
