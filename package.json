@@ -1,6 +1,6 @@
 {
   "name": "dsh-delete-conversation",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Permanently delete DSH conversations from a button beside Archive.",
   "type": "module",
   "license": "MIT",
@@ -16,7 +16,7 @@
   "bugs": "https://github.com/Jeatricy/DSH_Delete_Conversation/issues",
   "engines": {
     "node": ">=22",
-    "dsh": "0.2.1-rc.3"
+    "dsh": "0.2.1-rc.3 || 0.2.1-rc.5"
   },
   "exports": {
     ".": "./index.js",

@@ -1,13 +1,15 @@
 import * as nodeFs from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 
-// Compatibility adapter for DSH 0.2.1-rc.3. DSH has no session-delete API.
+// Compatibility adapter for the verified DSH 0.2.1-rc.3 and rc.5 implementations.
+// DSH has no session-delete API.
 // Private boundaries used deliberately: labeled Cordis lifecycle disposer,
 // JSONL tracker/cache, projection-cache write admission, query reconciliation,
 // and workspace's header-only indexes. Never synthesize lifecycle events.
-export const SUPPORTED_DSH_VERSION = '0.2.1-rc.3';
+export const SUPPORTED_DSH_VERSIONS = Object.freeze(['0.2.1-rc.3', '0.2.1-rc.5']);
 const ORIGINAL = Symbol.for('cordis.original');
 const EFFECT = Symbol.for('cordis.effect');
 const PACKAGES = ['dsh-agent-loop', 'dsh-session-persistence-jsonl', 'dsh-workspace',
@@ -33,23 +35,63 @@ function sessionId(value) {
   return value;
 }
 
+async function activePackageManifest(loader, base, specifier) {
+  const internal = loader.internal;
+  if (internal === undefined) {
+    // Same fallback as DSH client-modules when Node's internal loader is absent.
+    const require = createRequire(base);
+    return JSON.parse(await nodeFs.readFile(require.resolve(`${specifier}/package.json`), 'utf8'));
+  }
+  // Follow the resolver that imports the Host module, including ESM hooks.
+  // A failing/unknown internal resolver must never fall back to a different copy.
+  method(internal, 'resolveSync');
+  if (!['v1', 'v2'].includes(internal.version)) refuse('Unsupported DSH Loader resolver version.');
+  const resolved = internal.version === 'v2'
+    ? internal.resolveSync(base, { specifier, attributes: {} })
+    : internal.resolveSync(specifier, base, {});
+  if (typeof resolved?.url !== 'string' || !resolved.url.startsWith('file:')) {
+    refuse(`Cannot locate the active ${specifier} module on disk.`);
+  }
+  let dir = dirname(fileURLToPath(resolved.url));
+  while (true) {
+    let manifest;
+    try { manifest = JSON.parse(await nodeFs.readFile(join(dir, 'package.json'), 'utf8')); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (manifest?.name === specifier) return manifest;
+    const parent = dirname(dir);
+    if (parent === dir) refuse(`Cannot find the active ${specifier} package manifest.`);
+    dir = parent;
+  }
+}
+
 async function verifyHostVersion(ctx) {
-  method(ctx.loader, 'entries');
-  const entries = [...ctx.loader.entries()];
+  method(ctx?.loader, 'entries');
+  const loader = ctx.loader;
+  let entries;
+  try { entries = [...loader.entries()]; }
+  catch (cause) { throw new DeleteSessionError('unsupported-host', 'Cannot inspect active DSH Loader entries.', { cause }); }
+  let hostVersion;
   for (const name of PACKAGES) {
     const specifier = `@deepseek-ai/${name}`;
-    const entry = entries.find(item => item.options?.name === specifier && item.fiber);
-    const base = entry?.parent?.tree?.ctx?.baseUrl;
-    if (!base) refuse(`Cannot verify the active ${specifier} package.`);
-    let manifest;
-    try {
-      const require = createRequire(base);
-      manifest = JSON.parse(await nodeFs.readFile(require.resolve(`${specifier}/package.json`), 'utf8'));
-    } catch (cause) {
-      throw new DeleteSessionError('unsupported-host', `Cannot resolve ${specifier} from its active Loader context.`, { cause });
-    }
-    if (manifest.name !== specifier || manifest.version !== SUPPORTED_DSH_VERSION) {
-      refuse(`Conversation deletion supports DSH ${SUPPORTED_DSH_VERSION}; ${specifier} reports ${manifest.version}.`);
+    const active = entries.filter(item => item?.options?.name === specifier && item.fiber && !item.disabled);
+    if (!active.length) refuse(`Cannot verify the active ${specifier} package.`);
+    // Nested Loader trees can mount multiple copies. Checking only the first
+    // would hide a mixed or unverified implementation in another active tree.
+    for (const entry of active) {
+      const base = entry.parent?.tree?.ctx?.baseUrl;
+      if (!base) refuse(`Cannot verify the active ${specifier} package.`);
+      let manifest;
+      try { manifest = await activePackageManifest(loader, base, specifier); }
+      catch (cause) {
+        throw new DeleteSessionError('unsupported-host', `Cannot resolve ${specifier} from its active Loader context.`, { cause });
+      }
+      if (manifest?.name !== specifier || !SUPPORTED_DSH_VERSIONS.includes(manifest?.version)) {
+        refuse(`Conversation deletion supports DSH ${SUPPORTED_DSH_VERSIONS.join(' or ')}; ${specifier} reports ${manifest?.version}.`);
+      }
+      if (hostVersion !== undefined && manifest.version !== hostVersion) {
+        refuse(`Mixed active DSH package versions are unsupported: expected ${hostVersion}; ${specifier} reports ${manifest.version}.`);
+      }
+      hostVersion = manifest.version;
     }
   }
 }

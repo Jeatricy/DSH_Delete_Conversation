@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { resolve, join, dirname, basename } from 'node:path';
 import * as nodeFs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { createHostAdapter, findLifecycleDisposer, checkedSessionDirectory, removeProjectionCacheCopies } from '../src/host-adapter.js';
 
 const EFFECT = Symbol.for('cordis.effect');
@@ -304,4 +305,211 @@ test('non-Windows hosts are rejected before modifying service methods', async ()
   const original = f.ctx.sessionPersistence.open;
   await assert.rejects(createHostAdapter(f.ctx, { ...f.options, platform: 'linux' }), { code: 'unsupported-host' });
   assert.equal(f.ctx.sessionPersistence.open, original);
+});
+
+// Exercise the production version verifier: real temporary manifests and Node
+// package resolution, with no verifyVersion override or installed DSH access.
+const hostPackages = ['dsh-agent-loop', 'dsh-session-persistence-jsonl', 'dsh-workspace',
+  'dsh-session-projection-cache', 'dsh-session-query-sqlite', 'dsh-storage-domain', 'dsh-storage-json'];
+
+async function versionFixture(t, version = '0.2.1-rc.5') {
+  const f = fixture();
+  const temporaryRoot = resolve(tmpdir());
+  const root = await nodeFs.mkdtemp(join(temporaryRoot, 'dsh-delete-version-test-'));
+  t.after(async () => {
+    assert.equal(dirname(root), temporaryRoot);
+    assert.match(basename(root), /^dsh-delete-version-test-[A-Za-z0-9]+$/);
+    await nodeFs.rm(root, { recursive: true, force: true });
+  });
+  async function packages(branch, packageVersion) {
+    const base = pathToFileURL(join(root, branch, 'cordis.yml')).href;
+    const manifests = new Map();
+    const modules = new Map();
+    const entries = [];
+    for (const name of hostPackages) {
+      const specifier = `@deepseek-ai/${name}`;
+      const dir = join(root, branch, 'node_modules', '@deepseek-ai', name);
+      const manifestPath = join(dir, 'package.json');
+      const modulePath = join(dir, 'lib', 'index.js');
+      await nodeFs.mkdir(dirname(modulePath), { recursive: true });
+      await nodeFs.writeFile(manifestPath, JSON.stringify({ name: specifier, version: packageVersion,
+        type: 'module', exports: { '.': './lib/index.js', './package.json': './package.json' } }));
+      await nodeFs.writeFile(modulePath, 'throw new Error("Fixture Host modules must never execute");\n');
+      manifests.set(name, manifestPath);
+      modules.set(specifier, pathToFileURL(modulePath).href);
+      entries.push({ options: { name: specifier }, fiber: {}, parent: { tree: { ctx: { baseUrl: base } } } });
+    }
+    return { base, manifests, modules, entries };
+  }
+  const active = await packages('active', version);
+  f.ctx.loader = { entries: () => active.entries };
+  return { ...f, ...active, packages, options: { fs: f.fs, platform: 'win32' } };
+}
+
+async function assertVersionRefusal(f, message) {
+  const originalOpen = f.ctx.sessionPersistence.open;
+  const originalPut = f.ctx.sessionProjectionCache.put;
+  const originalObserve = f.ctx.sessionQuery.observeSession;
+  await assert.rejects(createHostAdapter(f.ctx, f.options), error => {
+    assert.equal(error.code, 'unsupported-host');
+    if (message) assert.match(error.message, message);
+    return true;
+  });
+  assert.equal(f.ctx.sessionPersistence.open, originalOpen);
+  assert.equal(f.ctx.sessionProjectionCache.put, originalPut);
+  assert.equal(f.ctx.sessionQuery.observeSession, originalObserve);
+  assert.deepEqual(f.events, []);
+  assert.equal(f.onDisk(), true);
+  assert.equal(f.cacheRecords.has(f.id), true);
+}
+
+for (const version of ['0.2.1-rc.3', '0.2.1-rc.5']) {
+  test(`real manifests admit ${version} and retain lifecycle/lease deletion ordering`, async t => {
+    const f = await versionFixture(t, version);
+    const originalOpen = f.ctx.sessionPersistence.open;
+    const adapter = await createHostAdapter(f.ctx, f.options);
+    try {
+      const result = await adapter.deleteSession(f.id);
+      assert.equal(result.deleted, true);
+      assert.equal(result.preservedDescendants, 1);
+      assert.equal(result.sharedAttachmentsRetained, true);
+      assert.deepEqual(f.events, ['archive', 'children-drain', 'lifecycle', 'cancel', 'idle', 'scope-cleanup', 'writer-close', 'detach', 'owner-release',
+        'lock', 'rm', 'schedule-active', 'schedule-inactive', 'workspace-detach', 'unpin', 'unarchive', 'cache-delete', 'query-reconcile', 'lock-close', 'removed']);
+      assert.deepEqual(f.scheduleTasks.map(task => task.id), ['foreign']);
+    } finally { await adapter.dispose(); }
+    assert.equal(f.ctx.sessionPersistence.open, originalOpen);
+  });
+}
+
+test('real manifests reject unverified rc.4, stable, future and missing versions', async t => {
+  for (const version of ['0.2.1-rc.4', '0.2.1', '0.2.2-rc.1', undefined]) {
+    await t.test(String(version), async t => {
+      const f = await versionFixture(t);
+      await nodeFs.writeFile(f.manifests.get('dsh-storage-json'), JSON.stringify({ name: '@deepseek-ai/dsh-storage-json', version }));
+      await assertVersionRefusal(f, /supports DSH/);
+    });
+  }
+});
+
+test('missing or unusable active Loader contexts fail before service mutation', async t => {
+  const cases = {
+    'missing loader': f => { delete f.ctx.loader; },
+    'non-iterable entries': f => { f.ctx.loader.entries = () => undefined; },
+    'missing package entry': f => { f.entries.pop(); },
+    'inactive package entry': f => { delete f.entries.at(-1).fiber; },
+    'disabled package entry': f => { f.entries.at(-1).disabled = true; },
+    'missing parent context': f => { delete f.entries.at(-1).parent; },
+    'missing base URL': f => { delete f.entries.at(-1).parent.tree.ctx.baseUrl; },
+    'invalid base URL': f => { f.entries.at(-1).parent.tree.ctx.baseUrl = 'relative.yml'; },
+  };
+  for (const [label, change] of Object.entries(cases)) await t.test(label, async t => {
+    const f = await versionFixture(t);
+    change(f);
+    await assertVersionRefusal(f);
+  });
+});
+
+test('unreadable, malformed and foreign manifests are refused', async t => {
+  for (const content of ['', '{broken', 'null', JSON.stringify({ name: 'foreign-package', version: '0.2.1-rc.5' })]) {
+    await t.test(content || 'missing manifest export target', async t => {
+      const f = await versionFixture(t);
+      // For the missing case, keep the package present but make its manifest
+      // export point at a nonexistent file; no destructive setup is needed.
+      await nodeFs.writeFile(f.manifests.get('dsh-storage-json'), content || JSON.stringify({
+        name: '@deepseek-ai/dsh-storage-json', version: '0.2.1-rc.5', exports: { './package.json': './missing.json' },
+      }));
+      await assertVersionRefusal(f);
+    });
+  }
+});
+
+test('mixed supported versions across active packages are refused in either order', async t => {
+  for (const version of ['0.2.1-rc.3', '0.2.1-rc.5']) await t.test(version, async t => {
+    const f = await versionFixture(t, version);
+    const other = version === '0.2.1-rc.3' ? '0.2.1-rc.5' : '0.2.1-rc.3';
+    await nodeFs.writeFile(f.manifests.get('dsh-storage-json'), JSON.stringify({ name: '@deepseek-ai/dsh-storage-json', version: other }));
+    await assertVersionRefusal(f, /Mixed active DSH package versions/);
+  });
+});
+
+test('a later duplicate active package cannot hide a mixed Loader tree', async t => {
+  const f = await versionFixture(t);
+  const other = await f.packages('other-tree', '0.2.1-rc.3');
+  f.entries.push(other.entries[0]);
+  await assertVersionRefusal(f, /Mixed active DSH package versions/);
+});
+
+test('same-version active copies are allowed and inactive copies do not select a version', async t => {
+  const f = await versionFixture(t);
+  const same = await f.packages('same-version', '0.2.1-rc.5');
+  const unknown = await f.packages('inactive-version', '0.2.1-rc.4');
+  const disabled = { ...unknown.entries[1], disabled: true };
+  const inactive = { ...unknown.entries[0], fiber: undefined };
+  f.entries.unshift(disabled, inactive);
+  f.entries.push(same.entries[0]);
+  const adapter = await createHostAdapter(f.ctx, f.options);
+  await adapter.dispose();
+  assert.deepEqual(f.events, []);
+});
+
+for (const version of ['v1', 'v2']) {
+  test(`Loader ${version} resolution checks the imported package instead of a require-resolved copy`, async t => {
+    for (const accepted of [true, false]) await t.test(accepted ? 'supported imported copy' : 'unsupported imported copy', async t => {
+      const f = await versionFixture(t, accepted ? '0.2.1-rc.4' : '0.2.1-rc.5');
+      const imported = await f.packages('esm-imported', accepted ? '0.2.1-rc.5' : '0.2.1-rc.4');
+      const calls = [];
+      const internal = { version, resolveSync(...args) {
+        assert.equal(this, internal);
+        const [specifier, base, attributes] = version === 'v1' ? args : [args[1].specifier, args[0], args[1].attributes];
+        assert.equal(base, f.base);
+        assert.deepEqual(attributes, {});
+        assert.equal(args.length, version === 'v1' ? 3 : 2);
+        calls.push(specifier);
+        return { url: imported.modules.get(specifier) };
+      } };
+      f.ctx.loader.internal = internal;
+      if (accepted) {
+        const adapter = await createHostAdapter(f.ctx, f.options);
+        await adapter.dispose();
+        assert.deepEqual(calls, hostPackages.map(name => `@deepseek-ai/${name}`));
+      } else {
+        await assertVersionRefusal(f, /reports 0\.2\.1-rc\.4/);
+        assert.equal(calls.length, 1);
+      }
+    });
+  });
+}
+
+test('unknown or failing internal resolvers never fall back to supported require manifests', async t => {
+  let unknownCalls = 0;
+  const cases = {
+    'unknown signature': { version: 'v3', resolveSync() { unknownCalls++; return undefined; } },
+    'missing resolver': { version: 'v2' },
+    'resolution failure': { version: 'v2', resolveSync() { throw new Error('Cannot resolve imported module'); } },
+    'non-file module': { version: 'v2', resolveSync() { return { url: 'data:text/javascript,export{}' }; } },
+    'missing resolution': { version: 'v1', resolveSync() { return undefined; } },
+  };
+  for (const [label, internal] of Object.entries(cases)) await t.test(label, async t => {
+    const f = await versionFixture(t);
+    f.ctx.loader.internal = internal;
+    await assertVersionRefusal(f, /Cannot resolve/);
+  });
+  assert.equal(unknownCalls, 0, 'Unknown resolver signatures must be rejected without invocation');
+});
+
+test('supported real versions still refuse unknown service and lifecycle structures', async t => {
+  for (const version of ['0.2.1-rc.3', '0.2.1-rc.5']) await t.test(version, async t => {
+    const f = await versionFixture(t, version);
+    const observations = f.ctx.sessionQuery._observations;
+    f.ctx.sessionQuery._observations = { ...observations, cache: {} };
+    await assertVersionRefusal(f, /bookkeeping/);
+    f.ctx.sessionQuery._observations = observations;
+    f.disposer[EFFECT].label = 'unverified-lifecycle';
+    const adapter = await createHostAdapter(f.ctx, f.options);
+    try {
+      await assert.rejects(adapter.deleteSession(f.id), { code: 'unsupported-host' });
+      assert.deepEqual(f.events, []);
+      assert.equal(f.onDisk(), true);
+    } finally { await adapter.dispose(); }
+  });
 });

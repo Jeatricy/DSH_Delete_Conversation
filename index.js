@@ -39,7 +39,7 @@ export function createFetchHandler(adapter) {
       return new Response('Invalid deletion request envelope', { status: 400 });
     }
     // DSH Connection admits authenticated peers and rejects non-owner peers BEFORE
-    // dispatching an exact Fetch route (dsh-client-connection 0.2.1-rc.3).
+    // dispatching an exact Fetch route (verified rc.3 and rc.5 implementations).
     const result = await rpc('delete', envelope.payload, request.signal, { principal: { kind: 'owner' } });
     return Response.json({ type: 'server-response', rpcId: envelope.rpcId, result });
   };
