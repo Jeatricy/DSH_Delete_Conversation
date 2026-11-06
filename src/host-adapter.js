@@ -4,12 +4,12 @@ import { dirname, basename, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 
-// Compatibility adapter for the verified DSH 0.2.1-rc.3 and rc.5 implementations.
+// Compatibility adapter for the verified DSH releases listed below.
 // DSH has no session-delete API.
 // Private boundaries used deliberately: labeled Cordis lifecycle disposer,
 // JSONL tracker/cache, projection-cache write admission, query reconciliation,
 // and workspace's header-only indexes. Never synthesize lifecycle events.
-export const SUPPORTED_DSH_VERSIONS = Object.freeze(['0.2.1-rc.3', '0.2.1-rc.5']);
+export const SUPPORTED_DSH_VERSIONS = Object.freeze(['0.2.1-rc.3', '0.2.1-rc.5', '0.2.2-rc.1']);
 const ORIGINAL = Symbol.for('cordis.original');
 const EFFECT = Symbol.for('cordis.effect');
 const PACKAGES = ['dsh-agent-loop', 'dsh-session-persistence-jsonl', 'dsh-workspace',
@@ -94,6 +94,7 @@ async function verifyHostVersion(ctx) {
       hostVersion = manifest.version;
     }
   }
+  return hostVersion;
 }
 
 /** Find the exact existing outer lifecycle, not agent.scope.dispose(). */
@@ -265,7 +266,8 @@ export async function removeProjectionCacheCopies(domain, value, fs = nodeFs) {
  */
 export async function createHostAdapter(ctx, options = {}) {
   if ((options.platform ?? process.platform) !== 'win32') refuse('Conversation deletion currently supports Windows only.');
-  await (options.verifyVersion ?? verifyHostVersion)(ctx);
+  const hostVersion = await (options.verifyVersion ?? verifyHostVersion)(ctx);
+  const hostSchedule = hostVersion === '0.2.2-rc.1';
   const fs = options.fs ?? nodeFs;
   const agents = concrete(ctx.agents);
   const sessions = concrete(ctx.sessions);
@@ -292,7 +294,10 @@ export async function createHostAdapter(ctx, options = {}) {
   for (const name of ['headers', 'sessionPaths', 'missingSessionPaths', 'invalidSessionPaths']) {
     if (typeof workspace[name]?.delete !== 'function') refuse(`Unsupported workspace index ${name}.`);
   }
-  if (schedule) for (const name of ['catalog', 'delete', 'create', 'update', 'serialize']) method(schedule, name);
+  if (schedule) {
+    const names = hostSchedule ? ['validateTarget', 'removeRows'] : ['delete', 'create', 'update'];
+    for (const name of ['catalog', 'serialize', ...names]) method(schedule, name);
+  }
   if (subagents) method(subagents, 'drainDescendants');
 
   const pending = new Map();
@@ -349,7 +354,12 @@ export async function createHostAdapter(ctx, options = {}) {
     if (controller?.agents && typeof controller.agents.resolve === 'function') patch(controller.agents, 'resolve', original => function(id, ...args) {
       admit(id); return Reflect.apply(original, this, [id, ...args]);
     });
-    if (schedule) {
+    if (schedule && hostSchedule) {
+      // Host schedule create and target-changing edits validate inside the same queue used for cleanup.
+      patch(schedule, 'validateTarget', original => function(target, ...args) {
+        admit(target.sessionId); return Reflect.apply(original, this, [target, ...args]);
+      });
+    } else if (schedule) {
       patch(schedule, 'create', original => function(id, ...args) { admit(id); return Reflect.apply(original, this, [id, ...args]); });
       patch(schedule, 'update', original => function(request, ...args) { admit(request.sessionId); return Reflect.apply(original, this, [request, ...args]); });
     }
@@ -377,7 +387,14 @@ export async function createHostAdapter(ctx, options = {}) {
     }
   }
   async function cleanupMetadata(id, plan) {
-    if (schedule) {
+    if (schedule && hostSchedule) {
+      await schedule.serialize(async () => {
+        // A task can be retargeted, so select and remove it in one queue slot.
+        // Only tasks with this delivery target belong to the deleted conversation.
+        const ids = (await schedule.catalog()).filter(task => task.target.sessionId === id).map(task => task.id);
+        await schedule.removeRows(ids, 'Conversation schedule cleanup failed', true);
+      });
+    } else if (schedule) {
       // Management and delivery share this queue; finish pre-gate creates first.
       await schedule.serialize(async () => {});
       // Catalog includes inactive rows and their stored delivery histories.

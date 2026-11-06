@@ -381,8 +381,43 @@ for (const version of ['0.2.1-rc.3', '0.2.1-rc.5']) {
   });
 }
 
+test('DSH 0.2.2-rc.1 removes only schedules targeting the deleted session within the schedule queue', async t => {
+  const f = await versionFixture(t, '0.2.2-rc.1');
+  const tasks = new Map([
+    ['active', { id: 'active', target: { kind: 'session', sessionId: f.id }, status: 'active' }],
+    ['ended', { id: 'ended', target: { kind: 'new_once', sessionId: f.id }, status: 'ended' }],
+    ['foreign', { id: 'foreign', target: { kind: 'session', sessionId: 'session-foreign' }, involvedSessionIds: [f.id] }],
+    ['recurring', { id: 'recurring', target: { kind: 'new' }, involvedSessionIds: [f.id] }],
+  ]);
+  let queued = false;
+  const validateTarget = async () => {};
+  f.ctx.schedule = {
+    async serialize(job) {
+      assert.equal(queued, false);
+      queued = true;
+      try { return await job(); } finally { queued = false; }
+    },
+    async catalog() { assert.equal(queued, true); return [...tasks.values()]; },
+    async removeRows(ids, _message, rearm) {
+      assert.equal(queued, true);
+      assert.equal(rearm, true);
+      for (const id of ids) tasks.delete(id);
+    },
+    validateTarget,
+  };
+  const adapter = await createHostAdapter(f.ctx, f.options);
+  try {
+    const result = await adapter.deleteSession(f.id);
+    assert.equal(result.deleted, true);
+    assert.deepEqual([...tasks.keys()], ['foreign', 'recurring']);
+    assert.throws(() => f.ctx.schedule.validateTarget({ kind: 'session', sessionId: f.id }), { code: 'session-deleting' });
+    await f.ctx.schedule.validateTarget(tasks.get('foreign').target);
+  } finally { await adapter.dispose(); }
+  assert.equal(f.ctx.schedule.validateTarget, validateTarget);
+});
+
 test('real manifests reject unverified rc.4, stable, future and missing versions', async t => {
-  for (const version of ['0.2.1-rc.4', '0.2.1', '0.2.2-rc.1', undefined]) {
+  for (const version of ['0.2.1-rc.4', '0.2.1', '0.2.2-rc.2', undefined]) {
     await t.test(String(version), async t => {
       const f = await versionFixture(t);
       await nodeFs.writeFile(f.manifests.get('dsh-storage-json'), JSON.stringify({ name: '@deepseek-ai/dsh-storage-json', version }));
