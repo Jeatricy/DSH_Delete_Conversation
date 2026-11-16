@@ -381,8 +381,9 @@ for (const version of ['0.2.1-rc.3', '0.2.1-rc.5']) {
   });
 }
 
-test('DSH 0.2.2-rc.1 removes only schedules targeting the deleted session within the schedule queue', async t => {
-  const f = await versionFixture(t, '0.2.2-rc.1');
+for (const version of ['0.2.2-rc.1', '0.2.2-rc.3']) {
+test(`DSH ${version} removes only schedules targeting the deleted session within the schedule queue`, async t => {
+  const f = await versionFixture(t, version);
   const tasks = new Map([
     ['active', { id: 'active', target: { kind: 'session', sessionId: f.id }, status: 'active' }],
     ['ended', { id: 'ended', target: { kind: 'new_once', sessionId: f.id }, status: 'ended' }],
@@ -415,9 +416,45 @@ test('DSH 0.2.2-rc.1 removes only schedules targeting the deleted session within
   } finally { await adapter.dispose(); }
   assert.equal(f.ctx.schedule.validateTarget, validateTarget);
 });
+}
 
-test('real manifests reject unverified rc.4, stable, future and missing versions', async t => {
-  for (const version of ['0.2.1-rc.4', '0.2.1', '0.2.2-rc.2', undefined]) {
+test('DSH 0.2.2-rc.3 uses the host schedule queue instead of retired per-session methods', async t => {
+  const f = await versionFixture(t, '0.2.2-rc.3');
+  const tasks = new Map([['target', { id: 'target', target: { kind: 'session', sessionId: f.id } }]]);
+  const calls = [];
+  f.ctx.schedule = {
+    async serialize(job) { calls.push('serialize'); return job(); },
+    async catalog() { calls.push('catalog'); return [...tasks.values()]; },
+    async removeRows(ids, _message, rearm) { calls.push('removeRows'); assert.equal(rearm, true); for (const id of ids) tasks.delete(id); },
+    validateTarget() { calls.push('validateTarget'); },
+    // Pre-0.2.2 surface: present only to prove the newer route wins.
+    delete() { assert.fail('retired schedule delete must not be called'); },
+    create() { assert.fail('retired schedule create must not be called'); },
+    update() { assert.fail('retired schedule update must not be called'); },
+  };
+  const adapter = await createHostAdapter(f.ctx, f.options);
+  try {
+    assert.equal((await adapter.deleteSession(f.id)).deleted, true);
+    assert.equal(tasks.size, 0);
+    assert.deepEqual(calls, ['serialize', 'catalog', 'removeRows']);
+  } finally { await adapter.dispose(); }
+});
+
+test('DSH 0.2.2-rc.3 deletes without a schedule service and leaves other conversations intact', async t => {
+  const f = await versionFixture(t, '0.2.2-rc.3');
+  delete f.ctx.schedule;
+  const adapter = await createHostAdapter(f.ctx, f.options);
+  try {
+    const result = await adapter.deleteSession(f.id);
+    assert.equal(result.deleted, true);
+    assert.equal(result.preservedDescendants, 1);
+    assert.equal(f.onDisk(), false);
+    assert.equal(f.cacheRecords.has(f.id), false);
+  } finally { await adapter.dispose(); }
+});
+
+test('real manifests reject unverified rc.2, rc.4, stable, future and missing versions', async t => {
+  for (const version of ['0.2.1-rc.4', '0.2.1', '0.2.2-rc.2', '0.2.2', undefined]) {
     await t.test(String(version), async t => {
       const f = await versionFixture(t);
       await nodeFs.writeFile(f.manifests.get('dsh-storage-json'), JSON.stringify({ name: '@deepseek-ai/dsh-storage-json', version }));
