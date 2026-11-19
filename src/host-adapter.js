@@ -9,10 +9,10 @@ import { createHash, randomUUID } from 'node:crypto';
 // Private boundaries used deliberately: labeled Cordis lifecycle disposer,
 // JSONL tracker/cache, projection-cache write admission, query reconciliation,
 // and workspace's header-only indexes. Never synthesize lifecycle events.
-export const SUPPORTED_DSH_VERSIONS = Object.freeze(['0.2.1-rc.3', '0.2.1-rc.5', '0.2.2-rc.1', '0.2.2-rc.3']);
+export const SUPPORTED_DSH_VERSIONS = Object.freeze(['0.2.1-rc.3', '0.2.1-rc.5', '0.2.2-rc.1', '0.2.2-rc.3', '0.2.2-rc.5']);
 // 0.2.2 moved schedules to the host-level service: tasks are selected by delivery
 // target inside the schedule write queue and removed through `removeRows`.
-const HOST_SCHEDULE_VERSIONS = Object.freeze(new Set(['0.2.2-rc.1', '0.2.2-rc.3']));
+const HOST_SCHEDULE_VERSIONS = Object.freeze(new Set(['0.2.2-rc.1', '0.2.2-rc.3', '0.2.2-rc.5']));
 const ORIGINAL = Symbol.for('cordis.original');
 const EFFECT = Symbol.for('cordis.effect');
 const PACKAGES = ['dsh-agent-loop', 'dsh-session-persistence-jsonl', 'dsh-workspace',

@@ -381,7 +381,7 @@ for (const version of ['0.2.1-rc.3', '0.2.1-rc.5']) {
   });
 }
 
-for (const version of ['0.2.2-rc.1', '0.2.2-rc.3']) {
+for (const version of ['0.2.2-rc.1', '0.2.2-rc.3', '0.2.2-rc.5']) {
 test(`DSH ${version} removes only schedules targeting the deleted session within the schedule queue`, async t => {
   const f = await versionFixture(t, version);
   const tasks = new Map([
@@ -454,7 +454,7 @@ test('DSH 0.2.2-rc.3 deletes without a schedule service and leaves other convers
 });
 
 test('real manifests reject unverified rc.2, rc.4, stable, future and missing versions', async t => {
-  for (const version of ['0.2.1-rc.4', '0.2.1', '0.2.2-rc.2', '0.2.2', undefined]) {
+  for (const version of ['0.2.1-rc.4', '0.2.1', '0.2.2-rc.2', '0.2.2-rc.4', '0.2.2', '0.2.2-rc.6', undefined]) {
     await t.test(String(version), async t => {
       const f = await versionFixture(t);
       await nodeFs.writeFile(f.manifests.get('dsh-storage-json'), JSON.stringify({ name: '@deepseek-ai/dsh-storage-json', version }));
